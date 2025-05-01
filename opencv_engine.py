@@ -5,6 +5,9 @@ import numpy as np
 from thumbor.engines import BaseEngine
 from thumbor.utils import logger
 
+# Import our modern face recognizer
+from modern_face_recognition import VVIPFaceRecognizer
+
 class Engine(BaseEngine):
     def __init__(self, context):
         super(Engine, self).__init__(context)
@@ -12,33 +15,15 @@ class Engine(BaseEngine):
         self.image = None
         self.image_data = None
         self.extension = None
-        #self.face_detector = None
-        # Face detection settings
-        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        self.profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_profileface.xml')
         
-        # VVIP face recognition
-        self.face_recognizer = self._init_face_recognizer()
+        # Initialize the modern face recognizer
+        self.face_recognizer = VVIPFaceRecognizer(
+            vvip_faces_dir=path.join(path.dirname(path.abspath(__file__)), 'vvip_faces'),
+            models_dir=path.join(path.dirname(path.abspath(__file__)), 'models'),
+            tolerance=0.5  # Adjust this based on testing (lower = stricter)
+        )
+        
         self.vvip_faces = []  # Will store locations of VVIP faces
-
-    def _init_face_recognizer(self):
-        # Check if we have OpenCV with DNN face recognition support
-        if hasattr(cv2, 'face') and hasattr(cv2.face, 'LBPHFaceRecognizer_create'):
-            recognizer = cv2.face.LBPHFaceRecognizer_create()
-            
-            # Load the recognizer model if it exists
-            model_path = path.join(path.dirname(path.abspath(__file__)),'vvip_faces', 'vvip_faces_model.yml')
-            if path.exists(model_path):
-                try:
-                    recognizer.read(model_path)
-                    print(f'✓ VVIP face recognition model loaded successfully')
-                    logger.info("VVIP face recognition model loaded successfully")
-                    return recognizer
-                except Exception as e:
-                    logger.error(f"Error loading face recognition model: {str(e)}")
-        
-        logger.warning("VVIP face recognition not available")
-        return None
 
     def load(self, buffer, extension):
         self.extension = extension
@@ -55,8 +40,8 @@ class Engine(BaseEngine):
             
         self.image = img
 
-        # Save debug image before face detection
-        self.save_debug_image("before")
+        # # Save debug image before face detection
+        # self.save_debug_image("before")
 
         # Run face detection when image is loaded
         self._detect_vvip_faces()
@@ -70,92 +55,22 @@ class Engine(BaseEngine):
         """Detect and recognize VVIP faces in the image"""
         self.vvip_faces = []
         
-        # Convert to grayscale for face detection
-        if len(self.image.shape) == 3:
-            gray = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = self.image
-            
-        # Detect frontal faces
-        frontal_faces = self.face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        )
+        # Use the modern face recognizer
+        detected_faces = self.face_recognizer.recognize_faces(self.image)
         
-        # # Detect profile faces (side view)
-        # profile_faces = self.profile_cascade.detectMultiScale(
-        #     gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        # )
-        
-        # # Flip image and detect profiles from other side
-        # flipped = cv2.flip(gray, 1)
-        # profile_faces2 = self.profile_cascade.detectMultiScale(
-        #     flipped, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        # )
-        
-        if len(frontal_faces) == 0:
-            print("No faces detected")
+        if not detected_faces:
+            logger.info("No VVIP faces detected")
             return
-        
-        print(f"Detected {len(frontal_faces)} faces")
-
-        # # Adjust coordinates for flipped faces
-        # h, w = gray.shape[:2]
-        # for (x, y, w_face, h_face) in profile_faces2:
-        #     profile_faces = np.vstack([profile_faces, np.array([w - x - w_face, y, w_face, h_face])]) if len(profile_faces) else np.array([[w - x - w_face, y, w_face, h_face]])
-        profile_faces=[]
-        all_faces = np.vstack([frontal_faces, profile_faces]) if len(frontal_faces) and len(profile_faces) else (frontal_faces if len(frontal_faces) else profile_faces)
-        
-        # if len(all_faces) == 0:
-        #     return
             
-        # Process all detected faces
-        for (x, y, w, h) in all_faces:
-            # If we have a face recognizer, try to identify the face
-            is_vvip = False
-            
-            if self.face_recognizer:
-                face_roi = gray[y:y+h, x:x+w]
-                try:
-                    # Resize to a standard size
-                    face_roi = cv2.resize(face_roi, (100, 100))
-                    
-                    # Predict who this face belongs to
-                    label, confidence = self.face_recognizer.predict(face_roi)
-                    print(f'label- {label}, confidence- {confidence}')
-                    # Lower confidence is better in LBPH
-                    if confidence <80: #< 70:  # Threshold for VVIP recognition
-                        is_vvip = True
-                        logger.info(f"VVIP detected with confidence: {confidence}")
-                        print(f"VVIP detected with confidence: {confidence}")
-                except Exception as e:
-                    print(f"Error during face recognition: {str(e)}")
-                    logger.error(f"Error during face recognition: {str(e)}")
-            
-            # For development/testing, consider all faces as VVIPs            
-            #is_vvip = True # Remove this in production when you have a trained model
-            
-            if is_vvip:
-                # Add a margin around the face for better cropping
-                margin = 0.5  # 50% extra margin
-                x_ext = int(x - (w * margin/2))
-                y_ext = int(y - (h * margin/2))
-                w_ext = int(w * (1 + margin))
-                h_ext = int(h * (1 + margin))
-                
-                # Ensure coordinates are within image bounds
-                x_ext = max(0, x_ext)
-                y_ext = max(0, y_ext)
-                w_ext = min(w_ext, self.image.shape[1] - x_ext)
-                h_ext = min(h_ext, self.image.shape[0] - y_ext)
-                
-                self.vvip_faces.append((x_ext, y_ext, w_ext, h_ext))
-        print(f'is_vvip - {is_vvip}')
+        # Store the face locations (and names, if needed)
+        for (x, y, w, h, name) in detected_faces:
+            self.vvip_faces.append((x, y, w, h))
+            logger.info(f"VVIP detected: {name} at ({x}, {y}, {w}, {h})")
+            print(f"✓ VVIP detected: {name} at (x={x}, y={y}, w={w}, h={h})")
 
     def draw_rectangle(self, x, y, width, height):
         cv2.rectangle(self.image, (int(x), int(y)), (int(x + width), int(y + height)), (255, 0, 0), 2)
 
-    # def crop(self, left, top, right, bottom):
-    #     self.image = self.image[int(top):int(bottom), int(left):int(right)]
     def crop(self, left, top, right, bottom):
         """Smart crop that ensures VVIP faces are included in the frame"""
         # If no VVIP faces are detected, proceed with normal crop
@@ -208,7 +123,6 @@ class Engine(BaseEngine):
         # After cropping, update VVIP face coordinates
         self._adjust_face_coords_after_crop(new_left, new_top)
 
-
     def _adjust_face_coords_after_crop(self, crop_left, crop_top):
         """Update face coordinates after cropping"""
         adjusted_faces = []
@@ -231,9 +145,6 @@ class Engine(BaseEngine):
         
         self.vvip_faces = adjusted_faces
 
-
-    # def resize(self, width, height):
-    #     self.image = cv2.resize(self.image, (int(width), int(height)), interpolation=cv2.INTER_AREA)
     def resize(self, width, height):
         # Store the original dimensions for scaling face coordinates
         orig_h, orig_w = self.image.shape[:2]
@@ -257,8 +168,6 @@ class Engine(BaseEngine):
             
             self.vvip_faces = scaled_faces
 
-    # def flip_horizontally(self):
-    #     self.image = cv2.flip(self.image, 1)
     def flip_horizontally(self):
         self.image = cv2.flip(self.image, 1)
         
@@ -273,8 +182,6 @@ class Engine(BaseEngine):
             
             self.vvip_faces = flipped_faces
 
-    # def flip_vertically(self):
-    #     self.image = cv2.flip(self.image, 0)
     def flip_vertically(self):
         self.image = cv2.flip(self.image, 0)
         
@@ -288,7 +195,6 @@ class Engine(BaseEngine):
                 flipped_faces.append((x, new_y, w, h))
             
             self.vvip_faces = flipped_faces
-
 
     def read(self, extension=None, quality=None):
         # Draw rectangles around VVIP faces for debugging
@@ -343,15 +249,6 @@ class Engine(BaseEngine):
         height, width = self.image.shape[:2]
         return (width, height)
 
-    # this method is to visualize the VVIP faces (for debugging)
-    def debug_vvip_faces(self):
-        """Creates a debug copy of the image with VVIP faces highlighted"""
-        debug_img = self.image.copy()
-        for (x, y, w, h) in self.vvip_faces:
-            cv2.rectangle(debug_img, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), 2)
-            
-        return debug_img
-
     def save_debug_image(self, tag="debug"):
         """Save a debug image showing all faces and marking VVIPs"""
         debug_img = self.image.copy()
@@ -360,21 +257,6 @@ class Engine(BaseEngine):
         if len(debug_img.shape) == 3 and debug_img.shape[2] == 3:
             debug_img = cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR)
         
-        # Get all faces for comparison
-        if len(self.image.shape) == 3:
-            gray = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = self.image
-        
-        frontal_faces = self.face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        )
-        
-        # Draw all detected faces in RED
-        for (x, y, w, h) in frontal_faces:
-            cv2.rectangle(debug_img, (int(x), int(y)), 
-                        (int(x + w), int(y + h)), (0, 0, 255), 2)
-            
         # Draw VVIP faces in GREEN
         for (x, y, w, h) in self.vvip_faces:
             cv2.rectangle(debug_img, (int(x), int(y)), 
