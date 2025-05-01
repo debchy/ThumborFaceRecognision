@@ -269,7 +269,7 @@ class Engine(BaseEngine):
                         (int(x + w), int(y + h)), (0, 255, 0), 3)
             
         # Save the debug image
-        debug_dir = '/tmp/thumbor_debug'
+        debug_dir = './tmp/thumbor_debug'
         if not path.exists(debug_dir):
             makedirs(debug_dir)
         

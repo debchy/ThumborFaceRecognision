@@ -174,3 +174,4 @@ cython_debug/
 .pypirc
 thumbor_storage/
 thumbor_env
+tmp/
