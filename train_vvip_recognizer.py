@@ -5,7 +5,8 @@ import sys
 import cv2
 
 # Import our modern face recognizer
-from modern_face_recognition import VVIPFaceRecognizer
+#from modern_face_recognition import VVIPFaceRecognizer
+from vvip_face_recognizer_insight import VVIPFaceRecognizerInsight as VVIPFaceRecognizer
 
 def main():
     """Train the face recognition model with VVIP images"""
@@ -53,7 +54,7 @@ def main():
         print("✓ Training completed successfully")
         
         # Create test script
-        recognizer.create_test_script()
+        #recognizer.create_test_script()
         
         print("\nTesting instructions:")
         print("1. To test recognition on an image:")

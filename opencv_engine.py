@@ -6,7 +6,9 @@ from thumbor.engines import BaseEngine
 from thumbor.utils import logger
 
 # Import our modern face recognizer
-from modern_face_recognition import VVIPFaceRecognizer
+#from modern_face_recognition import VVIPFaceRecognizer
+from vvip_face_recognizer_insight import VVIPFaceRecognizerInsight as VVIPFaceRecognizer
+
 
 class Engine(BaseEngine):
     def __init__(self, context):
@@ -20,7 +22,7 @@ class Engine(BaseEngine):
         self.face_recognizer = VVIPFaceRecognizer(
             vvip_faces_dir=path.join(path.dirname(path.abspath(__file__)), 'vvip_faces'),
             models_dir=path.join(path.dirname(path.abspath(__file__)), 'models'),
-            tolerance=0.5  # Adjust this based on testing (lower = stricter)
+            tolerance=0.4  # Adjust this based on testing (lower = stricter)
         )
         
         self.vvip_faces = []  # Will store locations of VVIP faces
@@ -87,7 +89,10 @@ class Engine(BaseEngine):
         new_left, new_top = left, top
         new_right, new_bottom = right, bottom
         
+        vvip_count = len(self.vvip_faces)
         for (x, y, w, h,_,_) in self.vvip_faces:
+            shift_thrishold = 3*w if vvip_count ==1 else w
+
             face_center_x = x + w/2
             face_center_y = y + h/2
             
@@ -98,12 +103,12 @@ class Engine(BaseEngine):
                 # Adjust crop to include this face
                 # Try to keep the original crop dimensions if possible
                 if face_center_x < left:
-                    shift = left - face_center_x + w/2
+                    shift = left - face_center_x + w/2 + shift_thrishold
                     new_left = max(0, left - shift)
                     new_right = min(img_width, new_left + crop_width)
                 
                 elif face_center_x > right:
-                    shift = face_center_x - right + w/2
+                    shift = face_center_x - right + w/2 + shift_thrishold
                     new_right = min(img_width, right + shift)
                     new_left = max(0, new_right - crop_width)
                 
