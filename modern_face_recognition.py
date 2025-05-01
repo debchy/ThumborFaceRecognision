@@ -177,6 +177,9 @@ class VVIPFaceRecognizer:
             w = right - left
             h = bottom - top
             
+            name = "Unknown"
+            confidence = 0.0
+
             # Compare this face against all known VVIP faces
             matches = face_recognition.compare_faces(
                 self.known_face_encodings, 
@@ -186,26 +189,39 @@ class VVIPFaceRecognizer:
             
             # If we found a match
             if True in matches:
-                # Find the index of the first match
-                match_index = matches.index(True)
-                name = self.known_face_names[match_index]
-                
-                # Add margin around face for better cropping
-                margin = 0.5  # 50% extra margin
-                x_ext = int(left - (w * margin/2))
-                y_ext = int(top - (h * margin/2))
-                w_ext = int(w * (1 + margin))
-                h_ext = int(h * (1 + margin))
-                
-                # Ensure coordinates are within image bounds
-                x_ext = max(0, x_ext)
-                y_ext = max(0, y_ext)
-                w_ext = min(w_ext, image.shape[1] - x_ext)
-                h_ext = min(h_ext, image.shape[0] - y_ext)
-                
-                vvip_faces.append((x_ext, y_ext, w_ext, h_ext, name))
-                #print(f"✓ Detected VVIP: {name}")
-                logger.info(f"Detected VVIP: {name}")
+                # Calculate face distances for all encodings
+                face_distances = face_recognition.face_distance(
+                    self.known_face_encodings, face_encoding
+                )
+
+                # Get the index of the best match
+                best_match_index = np.argmin(face_distances)
+                confidence = 1.0 - face_distances[best_match_index]
+
+                # Only if it's a strong enough match
+                if matches[best_match_index] and confidence >= (1.0 - self.tolerance):
+                    name = self.known_face_names[best_match_index]
+                    
+                    # Find the index of the first match
+                    match_index = matches.index(True)
+                    name = self.known_face_names[match_index]
+                    
+                    # Add margin around face for better cropping
+                    margin = 0.5  # 50% extra margin
+                    x_ext = int(left - (w * margin/2))
+                    y_ext = int(top - (h * margin/2))
+                    w_ext = int(w * (1 + margin))
+                    h_ext = int(h * (1 + margin))
+                    
+                    # Ensure coordinates are within image bounds
+                    x_ext = max(0, x_ext)
+                    y_ext = max(0, y_ext)
+                    w_ext = min(w_ext, image.shape[1] - x_ext)
+                    h_ext = min(h_ext, image.shape[0] - y_ext)
+                    
+                    vvip_faces.append((x_ext, y_ext, w_ext, h_ext, name, confidence))
+                    #print(f"✓ Detected VVIP: {name}")
+                    logger.info(f"Detected VVIP: {name}. confidence: {confidence}")
                 
         return vvip_faces
     
@@ -218,6 +234,7 @@ import cv2
 import sys
 import os
 import pickle
+import numpy as np
 
 def main():
     if len(sys.argv) < 2:

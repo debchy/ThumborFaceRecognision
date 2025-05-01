@@ -63,8 +63,8 @@ class Engine(BaseEngine):
             return
             
         # Store the face locations (and names, if needed)
-        for (x, y, w, h, name) in detected_faces:
-            self.vvip_faces.append((x, y, w, h))
+        for (x, y, w, h, name, confidence) in detected_faces:
+            self.vvip_faces.append((x, y, w, h,name,confidence))
             logger.info(f"VVIP detected: {name} at ({x}, {y}, {w}, {h})")
             print(f"✓ VVIP detected: {name} at (x={x}, y={y}, w={w}, h={h})")
 
@@ -87,7 +87,7 @@ class Engine(BaseEngine):
         new_left, new_top = left, top
         new_right, new_bottom = right, bottom
         
-        for (x, y, w, h) in self.vvip_faces:
+        for (x, y, w, h,_,_) in self.vvip_faces:
             face_center_x = x + w/2
             face_center_y = y + h/2
             
@@ -126,7 +126,7 @@ class Engine(BaseEngine):
     def _adjust_face_coords_after_crop(self, crop_left, crop_top):
         """Update face coordinates after cropping"""
         adjusted_faces = []
-        for (x, y, w, h) in self.vvip_faces:
+        for (x, y, w, h, name, confidence) in self.vvip_faces:
             # Adjust coordinates relative to new cropped image
             new_x = x - crop_left
             new_y = y - crop_top
@@ -141,7 +141,7 @@ class Engine(BaseEngine):
                 new_w = min(w, self.image.shape[1] - new_x)
                 new_h = min(h, self.image.shape[0] - new_y)
                 
-                adjusted_faces.append((new_x, new_y, new_w, new_h))
+                adjusted_faces.append((new_x, new_y, new_w, new_h, name, confidence))
         
         self.vvip_faces = adjusted_faces
 
@@ -158,12 +158,12 @@ class Engine(BaseEngine):
             scale_y = height / orig_h
             
             scaled_faces = []
-            for (x, y, w, h) in self.vvip_faces:
+            for (x, y, w, h, name, confidence) in self.vvip_faces:
                 scaled_faces.append((
                     int(x * scale_x),
                     int(y * scale_y),
                     int(w * scale_x),
-                    int(h * scale_y)
+                    int(h * scale_y), name, confidence
                 ))
             
             self.vvip_faces = scaled_faces
@@ -176,9 +176,9 @@ class Engine(BaseEngine):
             width = self.image.shape[1]
             flipped_faces = []
             
-            for (x, y, w, h) in self.vvip_faces:
+            for (x, y, w, h, name, confidence) in self.vvip_faces:
                 new_x = width - (x + w)
-                flipped_faces.append((new_x, y, w, h))
+                flipped_faces.append((new_x, y, w, h, name, confidence))
             
             self.vvip_faces = flipped_faces
 
@@ -190,17 +190,18 @@ class Engine(BaseEngine):
             height = self.image.shape[0]
             flipped_faces = []
             
-            for (x, y, w, h) in self.vvip_faces:
+            for (x, y, w, h, name, confidence) in self.vvip_faces:
                 new_y = height - (y + h)
-                flipped_faces.append((x, new_y, w, h))
+                flipped_faces.append((x, new_y, w, h, name, confidence))
             
             self.vvip_faces = flipped_faces
 
     def read(self, extension=None, quality=None):
         # Draw rectangles around VVIP faces for debugging
         # Comment this out in production if you don't want visible rectangles
-        for (x, y, w, h) in self.vvip_faces:
+        for (x, y, w, h, name, confidence) in self.vvip_faces:
             cv2.rectangle(self.image, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), 2)
+            cv2.putText(self.image, f'{name}: {confidence}', (int(x), int(y-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
         if quality is None:
             quality = self.context.config.QUALITY
@@ -258,7 +259,7 @@ class Engine(BaseEngine):
             debug_img = cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR)
         
         # Draw VVIP faces in GREEN
-        for (x, y, w, h) in self.vvip_faces:
+        for (x, y, w, h,_,_) in self.vvip_faces:
             cv2.rectangle(debug_img, (int(x), int(y)), 
                         (int(x + w), int(y + h)), (0, 255, 0), 3)
             

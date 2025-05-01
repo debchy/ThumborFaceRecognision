@@ -5,6 +5,7 @@ import cv2
 import sys
 import os
 import pickle
+import numpy as np
 
 def main():
     if len(sys.argv) < 2:
