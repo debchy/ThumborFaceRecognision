@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 from thumbor.app import ThumborServiceApp
 from thumbor.config import Config
 from thumbor.context import Context, ServerParameters
@@ -10,6 +11,17 @@ from tornado.ioloop import IOLoop
 from thumbor.importer import Importer
 from favicon_handler import FaviconHandler # Custom handler for favicon
 from web_handlers import MainHandler, UploadHandler, ListImagesHandler, ImageHandler
+import tornado.process
+
+# Configure logging
+# logging.basicConfig(
+#     level=logging.DEBUG,
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+#     handlers=[
+#         logging.StreamHandler(),
+#         logging.FileHandler('./log/thumbor_app.log')
+#     ]
+# )
 
 # Ensure directories exist
 UPLOAD_DIR = "thumbor_images/uploads"
@@ -41,15 +53,16 @@ def main():
     config_path = os.path.abspath('./thumbor.conf')
     config = Config.load(config_path)
     config.AUTO_WEBP = True  # Optional: Customize config
-    #config.LOADER = 'thumbor.loaders.http_loader'  # Ensure a loader is set
-    config.LOADER = 'thumbor.loaders.file_loader'
+    config.LOADER = 'thumbor.loaders.file_loader_http_fallback' #thumbor.loaders.http_loader'  # Ensure a loader is set
+    #config.LOADER = 'thumbor.loaders.file_loader'
     config.STORAGE = 'thumbor.storages.file_storage'
     config.FILE_LOADER_ROOT_PATH = os.path.abspath('.')
     config.ALLOW_UNSAFE_URL = True
     
+    
     server_parameters = ServerParameters(
-        port=8888,
-        ip='0.0.0.0',
+        port=config.HTTP_PORT,
+        ip=config.HTTP_HOST,
         config_path=config_path,
         log_level='debug',
         app_class= 'custom_thumbor_server.ThumborServiceApp',
@@ -78,8 +91,20 @@ def main():
 
     # Start the server
     server = HTTPServer(application)
+
+    # Enable multiple processes for concurrent request handling
+    # Use auto detection for the number of processes (usually equals number of CPU cores)
+    num_processes = tornado.process.cpu_count()
+    logging.info(f"Starting server with {num_processes} processes")
+
     server.listen(server_parameters.port, server_parameters.ip)
-    print(f"Thumbor server running at http://{server_parameters.ip}:{server_parameters.port}")
+    # Fork multiple processes
+    # server.bind(server_parameters.port, server_parameters.ip)
+    # server.start(num_processes)  # Fork multiple sub-processes
+
+    print(f"Thumbor server running at http://{server_parameters.ip}:{server_parameters.port} with {num_processes} processes")
+    
+    # Start the IO loop
     IOLoop.instance().start()
 
 if __name__ == "__main__":

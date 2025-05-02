@@ -56,7 +56,13 @@ class UploadHandler(tornado.web.RequestHandler):
                         f.write(file_info['body'])
                     
                     # Process the image using Thumbor
-                    process_image_with_thumbor(file_path, safe_filename)
+                    #process_image_with_thumbor(file_path, safe_filename)
+                    # Process the image using Thumbor in a separate thread to avoid blocking
+                    threading.Thread(
+                        target=process_image_with_thumbor,
+                        args=(file_path, safe_filename)
+                    ).start()
+
                     processed_count += 1
                     
                 except Exception as e:
@@ -133,7 +139,7 @@ def process_image_with_thumbor(file_path: str, filename: str) -> None:
     for width, height in CROP_DIMENSIONS:
         try:
             # Use Thumbor's smart crop
-            thumbor_url = f"http://localhost:8888/unsafe/{width}x{height}/smart/thumbor_images/uploads/{encoded_path}"
+            thumbor_url = f"http://localhost:8888/unsafe/{width}x{height}/smart/http://localhost:8888/uploads/{encoded_path}"
             print(f"Processing {filename} with Thumbor: {thumbor_url}")
             # Send request to Thumbor
             response = requests.get(thumbor_url,timeout=120)
