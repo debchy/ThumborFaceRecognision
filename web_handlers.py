@@ -9,6 +9,10 @@ import threading
 import urllib.parse
 import requests
 from datetime import datetime
+from direct_smart_crop import SmartCropper
+
+# Create a global smart cropper instance
+cropper = SmartCropper("./thumbor.conf")
 
 # Ensure directories exist
 UPLOAD_DIR = "thumbor_images/uploads"
@@ -33,7 +37,7 @@ class MainHandler(tornado.web.RequestHandler):
 
 class UploadHandler(tornado.web.RequestHandler):
     """Handler for image uploads and processing"""
-    def post(self):
+    async def post(self):
         try:
             files = self.request.files.get('images', [])
             
@@ -56,13 +60,8 @@ class UploadHandler(tornado.web.RequestHandler):
                         f.write(file_info['body'])
                     
                     # Process the image using Thumbor
-                    #process_image_with_thumbor(file_path, safe_filename)
-                    # Process the image using Thumbor in a separate thread to avoid blocking
-                    threading.Thread(
-                        target=process_image_with_thumbor,
-                        args=(file_path, safe_filename)
-                    ).start()
-
+                    await process_image_with_thumbor(file_path, safe_filename)
+                    
                     processed_count += 1
                     
                 except Exception as e:
@@ -127,7 +126,7 @@ def get_safe_filename(filename: str) -> str:
     safe_name = f"{base_name}_{timestamp}{ext}"
     return safe_name
 
-def process_image_with_thumbor(file_path: str, filename: str) -> None:
+async def process_image_with_thumbor(file_path: str, filename: str) -> None:
     """Process an image with Thumbor to create different crop dimensions"""
     # Get the relative path from upload directory to the file
     relative_path = os.path.relpath(file_path, UPLOAD_DIR)
@@ -139,22 +138,16 @@ def process_image_with_thumbor(file_path: str, filename: str) -> None:
     for width, height in CROP_DIMENSIONS:
         try:
             # Use Thumbor's smart crop
-            thumbor_url = f"http://localhost:8888/unsafe/{width}x{height}/smart/http://localhost:8888/uploads/{encoded_path}"
-            print(f"Processing {filename} with Thumbor: {thumbor_url}")
-            # Send request to Thumbor
-            response = requests.get(thumbor_url,timeout=120)
-            print(f'response: {response}')
-            if response.status_code == 200:
-                print(f"Response content: {response.status_code}")
-                # Save the processed image
-                output_filename = f"{base_name}_{width}x{height}{ext}"
-                output_path = os.path.join(OUTPUT_DIR, output_filename)
-                
-                with open(output_path, 'wb') as f:
-                    f.write(response.content)
-            else:
-                print(f"Response content: {response.text[:200]}")
-                raise Exception(f"Thumbor processing failed with status {response.status_code}")
+            output_filename = f"{base_name}_{width}x{height}{ext}"
+            output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+            output_file = await cropper.save_smart_cropped_image(
+                image_path=file_path,
+                width=width,
+                height=height,
+                output_path=output_path,
+                extension=ext
+            )            
         except requests.exceptions.Timeout:
             print(f"Timeout while processing {thumbor_url}")
         except requests.exceptions.RequestException as e:

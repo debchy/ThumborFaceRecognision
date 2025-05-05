@@ -17,6 +17,8 @@ class Engine(BaseEngine):
         self.image = None
         self.image_data = None
         self.extension = None
+        self.original_mode = None
+        self.grayscale_image = None  # For storing grayscale version of the image
         
         # Initialize the modern face recognizer
         self.face_recognizer = VVIPFaceRecognizer(
@@ -39,6 +41,14 @@ class Engine(BaseEngine):
         if len(img.shape) == 3 and img.shape[2] == 3:
             # Convert BGR to RGB
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            self.original_mode = "RGB"
+        elif len(img.shape) == 3 and img.shape[2] == 4:
+            # Convert BGRA to RGBA
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+            self.original_mode = "RGBA"
+        else:
+            # Grayscale
+            self.original_mode = "L"
             
         self.image = img
 
@@ -66,7 +76,7 @@ class Engine(BaseEngine):
             
         # Store the face locations (and names, if needed)
         for (x, y, w, h, name, confidence) in detected_faces:
-            self.vvip_faces.append((x, y, w, h,name,confidence))
+            self.vvip_faces.append((x, y, w, h, name, confidence))
             logger.info(f"VVIP detected: {name} at ({x}, {y}, {w}, {h})")
             print(f"✓ VVIP detected: {name} at (x={x}, y={y}, w={w}, h={h})")
 
@@ -78,6 +88,8 @@ class Engine(BaseEngine):
         # If no VVIP faces are detected, proceed with normal crop
         if not self.vvip_faces:
             self.image = self.image[int(top):int(bottom), int(left):int(right)]
+            if self.grayscale_image is not None:
+                self.grayscale_image = self.grayscale_image[int(top):int(bottom), int(left):int(right)]
             return
             
         # Calculate dimensions of the requested crop
@@ -90,8 +102,8 @@ class Engine(BaseEngine):
         new_right, new_bottom = right, bottom
         
         vvip_count = len(self.vvip_faces)
-        for (x, y, w, h,_,_) in self.vvip_faces:
-            shift_thrishold = 3*w if vvip_count ==1 else w
+        for (x, y, w, h, _, _) in self.vvip_faces:
+            shift_thrishold = 3*w if vvip_count == 1 else w
 
             face_center_x = x + w/2
             face_center_y = y + h/2
@@ -125,6 +137,10 @@ class Engine(BaseEngine):
         # Apply the adjusted crop
         self.image = self.image[int(new_top):int(new_bottom), int(new_left):int(new_right)]
         
+        # Also crop the grayscale image if it exists
+        if self.grayscale_image is not None:
+            self.grayscale_image = self.grayscale_image[int(new_top):int(new_bottom), int(new_left):int(new_right)]
+        
         # After cropping, update VVIP face coordinates
         self._adjust_face_coords_after_crop(new_left, new_top)
 
@@ -157,6 +173,11 @@ class Engine(BaseEngine):
         # Perform the resize
         self.image = cv2.resize(self.image, (int(width), int(height)), interpolation=cv2.INTER_AREA)
         
+        # Also resize grayscale image if it exists
+        if self.grayscale_image is not None:
+            self.grayscale_image = cv2.resize(self.grayscale_image, (int(width), int(height)), 
+                                            interpolation=cv2.INTER_AREA)
+        
         # Scale the face coordinates
         if self.vvip_faces:
             scale_x = width / orig_w
@@ -176,6 +197,10 @@ class Engine(BaseEngine):
     def flip_horizontally(self):
         self.image = cv2.flip(self.image, 1)
         
+        # Also flip grayscale if it exists
+        if self.grayscale_image is not None:
+            self.grayscale_image = cv2.flip(self.grayscale_image, 1)
+        
         # Adjust face coordinates for horizontal flip
         if self.vvip_faces:
             width = self.image.shape[1]
@@ -190,6 +215,10 @@ class Engine(BaseEngine):
     def flip_vertically(self):
         self.image = cv2.flip(self.image, 0)
         
+        # Also flip grayscale if it exists
+        if self.grayscale_image is not None:
+            self.grayscale_image = cv2.flip(self.grayscale_image, 0)
+        
         # Adjust face coordinates for vertical flip
         if self.vvip_faces:
             height = self.image.shape[0]
@@ -200,6 +229,46 @@ class Engine(BaseEngine):
                 flipped_faces.append((x, new_y, w, h, name, confidence))
             
             self.vvip_faces = flipped_faces
+
+    def convert_to_grayscale(self, update_image=True, alpha=True):
+        """Convert the image to grayscale.
+        This method is required by Thumbor's feature detector.
+        """
+        if len(self.image.shape) == 2:
+            # Image is already grayscale
+            if update_image:
+                pass  # Already grayscale
+            else:
+                self.grayscale_image = self.image.copy()
+        else:
+            # Color image - convert to grayscale
+            if update_image:
+                self.image = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
+            else:
+                if len(self.image.shape) == 3 and self.image.shape[2] == 4:
+                    # RGBA image
+                    if alpha:
+                        # Keep alpha channel
+                        rgb = cv2.cvtColor(self.image[:,:,:3], cv2.COLOR_RGB2GRAY)
+                        self.grayscale_image = np.zeros((rgb.shape[0], rgb.shape[1], 2), dtype=np.uint8)
+                        self.grayscale_image[:,:,0] = rgb
+                        self.grayscale_image[:,:,1] = self.image[:,:,3]  # Alpha channel
+                    else:
+                        # Ignore alpha channel
+                        self.grayscale_image = cv2.cvtColor(self.image[:,:,:3], cv2.COLOR_RGB2GRAY)
+                else:
+                    # RGB image
+                    self.grayscale_image = cv2.cvtColor(self.image, cv2.COLOR_RGB2GRAY)
+        
+        return self.grayscale_image
+
+    def get_grayscale_image(self):
+        """Return the grayscale version of the image.
+        This is used by some detectors.
+        """
+        if self.grayscale_image is None:
+            self.convert_to_grayscale(update_image=False)
+        return self.grayscale_image
 
     def read(self, extension=None, quality=None):
         # Draw rectangles around VVIP faces for debugging
@@ -225,6 +294,9 @@ class Engine(BaseEngine):
         if len(self.image.shape) == 3 and self.image.shape[2] == 3:
             # Convert RGB to BGR for saving
             img = cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR)
+        elif len(self.image.shape) == 3 and self.image.shape[2] == 4:
+            # Convert RGBA to BGRA for saving
+            img = cv2.cvtColor(self.image, cv2.COLOR_RGBA2BGRA)
         else:
             img = self.image
             
@@ -262,9 +334,11 @@ class Engine(BaseEngine):
         # Convert to BGR for OpenCV saving
         if len(debug_img.shape) == 3 and debug_img.shape[2] == 3:
             debug_img = cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR)
+        elif len(debug_img.shape) == 3 and debug_img.shape[2] == 4:
+            debug_img = cv2.cvtColor(debug_img, cv2.COLOR_RGBA2BGRA)
         
         # Draw VVIP faces in GREEN
-        for (x, y, w, h,_,_) in self.vvip_faces:
+        for (x, y, w, h, _, _) in self.vvip_faces:
             cv2.rectangle(debug_img, (int(x), int(y)), 
                         (int(x + w), int(y + h)), (0, 255, 0), 3)
             
