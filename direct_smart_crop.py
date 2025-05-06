@@ -59,6 +59,7 @@ class SmartCropper:
                     'thumbor.detectors.face_detector',
                     'thumbor.detectors.feature_detector',
                 ]
+            self.config.MAX_AGE = 0
         else:
             logger.info(f'Using default configuration, path not found: {config_path}')
             self.config = Config()
@@ -133,37 +134,46 @@ class SmartCropper:
                 logger.info(f"Using VVIP face as focal point: {name} at ({x}, {y})")
 
         # If no VVIP faces or want to try standard face detection anyway
-        if not isVVIP or not focal_points:
-            try:
-                self.context.modules.engine = engine
-                face_detector = FaceDetector(self.context, 0, self.config.DETECTORS)
-                face_detector.detector_name = 'face_detector'
-                fp = await face_detector.detect()
-                if fp:
-                    focal_points.extend(fp)
-                    logger.info(f"Found {len(fp)} faces for focal points")
-            except Exception as e:
-                logger.warning(f"Face detection failed: {str(e)}")
+        #if isVVIP or not focal_points:
+        try:
+            self.context.modules.engine = engine
+            face_detector = FaceDetector(self.context, 0, self.config.DETECTORS)
+            face_detector.detector_name = 'face_detector'
+            # Setup any detector-specific attributes
+            if hasattr(face_detector, 'setup'):
+                await face_detector.setup()
+            fp = await face_detector.detect()
+            print('face detector fp: ', len( self.context.request.focal_points ))
+            if fp:
+                focal_points.extend(fp)
+                logger.info(f"Found {len(fp)} faces for focal points")
+        except Exception as e:
+            logger.warning(f"Face detection failed: {str(e)}")
         
         # If no faces found or want to try feature detection anyway
-        if not isVVIP or not focal_points:
-            try:
-                self.context.modules.engine = engine
-                feature_detector = FeatureDetector(self.context, 1, self.config.DETECTORS)
-                feature_detector.detector_name = 'feature_detector'
-                fp = await feature_detector.detect()
-                if fp:
-                    focal_points.extend(fp)
-                    logger.info(f"Found {len(fp)} features for focal points")
-            except Exception as e:
-                logger.warning(f"Feature detection failed: {str(e)}")
+        #if isVVIP or not focal_points:
+        try:
+            self.context.modules.engine = engine
+            feature_detector = FeatureDetector(self.context, 1, self.config.DETECTORS)
+            feature_detector.detector_name = 'feature_detector'
+            fp = await feature_detector.detect()
+            print('feature detector fp: ', len(self.context.request.focal_points))
+            if fp:
+                focal_points.extend(fp)
+                logger.info(f"Found {len(fp)} features for focal points")
+        except Exception as e:
+            logger.warning(f"Feature detection failed: {str(e)}")
         
+        if len( self.context.request.focal_points )>0:
+            focal_points.extend(self.context.request.focal_points)
+
         # If still no focal points, use center of image
         if not focal_points:
             logger.info("No faces or features detected, using center of image")
             width, height = engine.size
             focal_points = [FocalPoint(width / 2, height / 2, 1)]
         
+        print('focal_points:\n',focal_points)
         return focal_points
 
     def _calculate_crop_dimensions(self, engine, width, height, focal_points):
@@ -253,16 +263,19 @@ class SmartCropper:
         
         # Crop the image
         engine.crop(*crop_dimensions)
-        
+
+        # Convert to specified format if needed
+        fullsized_img_buffer = engine.read(extension)       
+
         # Resize to final dimensions
         engine.resize(width, height)
         
         # Convert to specified format if needed
         img_buffer = engine.read(extension)            
         
-        return img_buffer
+        return img_buffer, fullsized_img_buffer, crop_dimensions
 
-    async def save_smart_cropped_image(self, image_path, width, height, output_path, extension=None):
+    async def save_smart_cropped_image(self, image_path, width, height, output_path, extension=None, save_image=True, keep_fullsized=False):
         """
         Perform smart cropping and save the result
         
@@ -276,19 +289,29 @@ class SmartCropper:
         Returns:
             str: Path to the saved image
         """
-        img_buffer = await self.smart_crop(image_path, width, height, extension)
+        img_buffer, fullsized_img_buffer, crop_dimensions = await self.smart_crop(image_path, width, height, extension)
         
-        # Make sure the output directory exists
-        output_dir = os.path.dirname(output_path)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        
-        # Save the processed image
-        with open(output_path, 'wb') as f:
-            f.write(img_buffer)
-        
-        logger.info(f"Saved smart cropped image to {output_path}")
-        return output_path
+        if save_image:
+            # Make sure the output directory exists
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            # Save the processed image
+            with open(output_path, 'wb') as f:
+                f.write(img_buffer)
+            
+            logger.info(f"Saved smart cropped image to {output_path}")
+            if keep_fullsized:
+                _, file_ext = os.path.splitext(output_path)
+                output_path_without_ext, _ = os.path.splitext(output_path)
+                output_path_original = f"{output_path_without_ext}_original{file_ext}"
+                
+                # Save the crop for original image
+                with open(output_path_original, 'wb') as f:
+                    f.write(fullsized_img_buffer)
+
+        return crop_dimensions
 
     def smart_crop_sync(self, image_path, width, height, output_path=None, extension=None):
         """
