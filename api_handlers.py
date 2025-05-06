@@ -105,8 +105,8 @@ class ProcessImageHandler(RequestHandler):
                         "crop_dimensions" :{
                             "x" : crop_dimensions[0],
                             "y" : crop_dimensions[1],
-                            "width" : crop_dimensions[2],
-                            "height" : crop_dimensions[3] 
+                            "right" : crop_dimensions[2],
+                            "bottom" : crop_dimensions[3] 
                         }
                     }
                 )
