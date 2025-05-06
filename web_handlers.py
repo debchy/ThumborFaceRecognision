@@ -154,6 +154,7 @@ async def process_image_with_thumbor(file_path: str, filename: str) -> None:
             print(f"Request error: {str(e)}")
         except Exception as e:
             print(f"Error processing {width}x{height}: {str(e)}", exc_info=True)
+            
 def list_processed_images() -> List[Dict[str, Any]]:
     """List all processed images with their metadata"""
     result = []

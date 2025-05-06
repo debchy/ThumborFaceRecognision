@@ -11,14 +11,8 @@ from thumbor.context import Context, ServerParameters
 from thumbor.config import Config
 from thumbor.importer import Importer
 from thumbor.utils import logger
+from opencv_engine import Engine as OpenCVEngine
 
-
-# Try to import OpenCV engine if available
-try:
-    from opencv_engine import Engine as OpenCVEngine
-    OPENCV_AVAILABLE = True
-except ImportError:
-    OPENCV_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -102,7 +96,7 @@ class SmartCropper:
     def _create_engine(self, image_buffer, extension='.jpg'):
         """Create a Thumbor engine with the image"""
         
-        if hasattr(self.config, 'ENGINE') and self.config.ENGINE == "opencv_engine" and OPENCV_AVAILABLE:
+        if hasattr(self.config, 'ENGINE') and self.config.ENGINE == "opencv_engine" :
             engine = OpenCVEngine(self.context)
             engine.load(image_buffer, extension)
         else:
