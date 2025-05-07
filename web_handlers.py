@@ -9,7 +9,7 @@ import threading
 import urllib.parse
 import requests
 from datetime import datetime
-from direct_smart_crop import SmartCropper
+from direct_smart_crop import Rendition, SmartCropper
 
 # Create a global smart cropper instance
 cropper = SmartCropper("./thumbor.conf")
@@ -133,28 +133,26 @@ async def process_image_with_thumbor(file_path: str, filename: str) -> None:
     encoded_path = urllib.parse.quote(relative_path, safe='')
     
     base_name, ext = os.path.splitext(filename)
-    
+    renditions = [] 
     # Create crops for each dimension
     for width, height in CROP_DIMENSIONS:
-        try:
-            # Use Thumbor's smart crop
-            output_filename = f"{base_name}_{width}x{height}{ext}"
-            output_path = os.path.join(OUTPUT_DIR, output_filename)
+        # Use Thumbor's smart crop
+        output_filename = f"{base_name}_{width}x{height}{ext}"
+        output_path = os.path.join(OUTPUT_DIR, output_filename)
 
-            output_file = await cropper.save_smart_cropped_image(
-                image_path=file_path,
-                width=width,
-                height=height,
-                output_path=output_path,
-                extension=ext
-            )            
-        except requests.exceptions.Timeout:
-            print(f"Timeout while processing {thumbor_url}")
-        except requests.exceptions.RequestException as e:
-            print(f"Request error: {str(e)}")
-        except Exception as e:
-            print(f"Error processing {width}x{height}: {str(e)}", exc_info=True)
-            
+        renditions.append(Rendition(width=width, height= height, output_path=output_path))
+
+    try:
+        await cropper.smart_crop_multiple(
+            image_path      = file_path,
+            renditions      = renditions,
+            extension       = ext,
+            save_image      = True,
+            keep_fullsized  = False
+        )
+    except Exception as e:
+        print(f"Error processing", e)
+    
 def list_processed_images() -> List[Dict[str, Any]]:
     """List all processed images with their metadata"""
     result = []

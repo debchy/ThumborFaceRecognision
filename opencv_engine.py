@@ -28,6 +28,7 @@ class Engine(BaseEngine):
         )
         
         self.vvip_faces = []  # Will store locations of VVIP faces
+        self.is_draw_rectangle = self.context.config.LOG_LEVEL == 'DEBUG'
 
     def load(self, buffer, extension):
         self.extension = extension
@@ -58,8 +59,8 @@ class Engine(BaseEngine):
         # Run face detection when image is loaded
         self._detect_vvip_faces()
 
-        # Save debug image after face detection
-        self.save_debug_image("after")
+        # # Save debug image after face detection
+        # self.save_debug_image("after")
 
         return True
 
@@ -272,11 +273,12 @@ class Engine(BaseEngine):
 
     def read(self, extension=None, quality=None):
         # Draw rectangles around VVIP faces for debugging
-        # Comment this out in production if you don't want visible rectangles
-        for (x, y, w, h, name, confidence) in self.vvip_faces:
-            cv2.rectangle(self.image, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), 2)
-            cv2.putText(self.image, f'{name}: {confidence}', (int(x), int(y-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
+        if self.is_draw_rectangle == True:
+            # Comment this out in production if you don't want visible rectangles
+            for (x, y, w, h, name, confidence) in self.vvip_faces:
+                cv2.rectangle(self.image, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), 2)
+                cv2.putText(self.image, f'{name}: {confidence}', (int(x), int(y-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
         if quality is None:
             quality = self.context.config.QUALITY
             

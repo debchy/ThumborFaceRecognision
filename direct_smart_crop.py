@@ -1,18 +1,21 @@
+import copy
 import os
 import io
 import asyncio
 import logging
+from typing import Optional
 from PIL import Image
 from thumbor.engines.pil import Engine as PILEngine
 from thumbor.point import FocalPoint
 from thumbor.detectors.feature_detector import Detector as FeatureDetector
 from thumbor.detectors.face_detector import Detector as FaceDetector
+from thumbor.detectors.profile_detector import Detector as ProfileDetector
 from thumbor.context import Context, ServerParameters
 from thumbor.config import Config
 from thumbor.importer import Importer
 from thumbor.utils import logger
 from opencv_engine import Engine as OpenCVEngine
-
+from PIL import Image, ImageDraw
 
 # Configure logging
 logging.basicConfig(
@@ -45,6 +48,21 @@ class MockRequest:
         self.max_bytes = None
         self.auto_png_to_jpg = None
 
+class Rendition:
+    """
+    A class representing a crop rendition with dimensions and output path
+    """
+    def __init__(self, width: int, height: int, output_path: Optional[str] = None):
+        self.width = width
+        self.height = height
+        self.output_path = output_path
+        self.crop_dimensions = None
+        self.img_buffer = None
+        self.fullsized_img_buffer = None
+        
+    def __str__(self):
+        return f"Rendition({self.width}x{self.height})"
+
 class SmartCropper:
     """
     A class that performs Thumbor's smart cropping directly without HTTP requests
@@ -58,6 +76,7 @@ class SmartCropper:
                 self.config.DETECTORS = [
                     'thumbor.detectors.face_detector',
                     'thumbor.detectors.feature_detector',
+                    'thumbor.detectors.profile_detector'
                 ]
             self.config.MAX_AGE = 0
         else:
@@ -106,6 +125,24 @@ class SmartCropper:
 
         return engine
 
+    async def _run_detector(self, detector_class, index, name):
+        """Run a specific detector and handle exceptions"""
+        try:
+            self.context.request.focal_points = [] #clean up result for previous detection
+            detector = detector_class(self.context, index, [])  # Empty list to prevent next() calls
+            detector.detector_name = name
+            
+            # Setup any detector-specific attributes
+            if hasattr(detector, 'setup'):
+                await detector.setup()
+            
+            fp = await detector.detect()
+            logger.info(f"{name} found {len(self.context.request.focal_points)} focal points")
+            return self.context.request.focal_points
+        except Exception as e:
+            logger.warning(f"{name} detection failed: {str(e)}")
+            return []
+
     async def _get_focal_points_async(self, engine, image_path):
         """Get focal points for smart cropping"""
         focal_points = []
@@ -114,6 +151,7 @@ class SmartCropper:
         # Setup mock request
         mock_request = MockRequest(image_path)
         self.context.request = mock_request
+        self.context.modules.engine = engine
         
         # Also set the engine in the request
         mock_request.engine = engine
@@ -123,11 +161,14 @@ class SmartCropper:
         if hasattr(engine, 'vvip_faces') and engine.vvip_faces:
             for (x, y, w, h, name, confidence) in engine.vvip_faces:
                 # Give VVIP faces a very high weight to ensure they're prioritized
-                weight = 100  # High weight to ensure VVIP faces are prioritized
+                weight = 1000000  # High weight to ensure VVIP faces are prioritized
                 fp = FocalPoint(
                     x + w/2,  # Center X of face
                     y + h/2,  # Center Y of face
-                    weight
+                    width=w,
+                    height=h,
+                    weight=weight*confidence,
+                    origin="VVIP"
                 )
                 focal_points.append(fp)
                 isVVIP = True
@@ -135,35 +176,19 @@ class SmartCropper:
 
         # If no VVIP faces or want to try standard face detection anyway
         #if isVVIP or not focal_points:
-        try:
-            self.context.modules.engine = engine
-            face_detector = FaceDetector(self.context, 0, self.config.DETECTORS)
-            face_detector.detector_name = 'face_detector'
-            # Setup any detector-specific attributes
-            if hasattr(face_detector, 'setup'):
-                await face_detector.setup()
-            fp = await face_detector.detect()
-            print('face detector fp: ', len( self.context.request.focal_points ))
-            if fp:
-                focal_points.extend(fp)
-                logger.info(f"Found {len(fp)} faces for focal points")
-        except Exception as e:
-            logger.warning(f"Face detection failed: {str(e)}")
+        # Run face detector
+        face_points = await self._run_detector(FaceDetector, 0, "face_detector")
+        focal_points.extend(face_points)
         
-        # If no faces found or want to try feature detection anyway
-        #if isVVIP or not focal_points:
-        try:
-            self.context.modules.engine = engine
-            feature_detector = FeatureDetector(self.context, 1, self.config.DETECTORS)
-            feature_detector.detector_name = 'feature_detector'
-            fp = await feature_detector.detect()
-            print('feature detector fp: ', len(self.context.request.focal_points))
-            if fp:
-                focal_points.extend(fp)
-                logger.info(f"Found {len(fp)} features for focal points")
-        except Exception as e:
-            logger.warning(f"Feature detection failed: {str(e)}")
+        # Run profile detector
+        profile_points = await self._run_detector(ProfileDetector, 1, "profile_detector")
+        focal_points.extend(profile_points)
         
+        # Run feature detector
+        feature_points = await self._run_detector(FeatureDetector, 2, "feature_detector")
+        focal_points.extend(feature_points)
+        
+
         if len( self.context.request.focal_points )>0:
             focal_points.extend(self.context.request.focal_points)
 
@@ -221,20 +246,207 @@ class SmartCropper:
         
         return (left, top, left + new_width, top + new_height)
 
-    async def smart_crop(self, image_path, width, height, extension=None):
+    
+    def draw_focal_points(self, image_path, focal_points, renditions, original_dimensions):
+        """Draw focal points and multiple crop dimensions on the image for debugging."""
+        try:
+            image = Image.open(image_path)  # Open the image
+            # Create a drawing context
+            draw = ImageDraw.Draw(image)
+
+            # Draw each focal point as a circle with size and color based on weight and origin
+            colors = {
+                "VVIP": "yellow",
+                "face_detector": "red",
+                "profile_detector": "blue",
+                "feature_detector": "green",
+                "unknown": "white"
+            }
+
+            # Calculate weighted center point for visualization
+            if focal_points:
+                total_weight = sum(fp.weight for fp in focal_points)
+                weighted_x = sum(fp.x * fp.weight for fp in focal_points) / total_weight if total_weight > 0 else image.width / 2
+                weighted_y = sum(fp.y * fp.weight for fp in focal_points) / total_weight if total_weight > 0 else image.height / 2
+            else:
+                weighted_x, weighted_y = image.width / 2, image.height / 2
+
+            # Draw the weighted center point as a larger purple circle
+            center_radius = 10
+            draw.ellipse([
+                weighted_x - center_radius, 
+                weighted_y - center_radius, 
+                weighted_x + center_radius, 
+                weighted_y + center_radius
+            ], outline="purple", width=3)
+            draw.text((weighted_x + center_radius + 2, weighted_y), "Weighted Center", fill="purple")
+            
+            for fp in focal_points:
+                # Base radius on weight, but keep it reasonable
+                weight_factor = min(1.0, fp.weight / 1000) if fp.weight > 1000 else fp.weight / 1000
+                base_radius = 5
+                radius = base_radius + (base_radius * weight_factor)
+                
+                x, y = fp.x, fp.y
+                # Calculate the bounds of the circle
+                left = x - radius
+                top = y - radius
+                right = x + radius
+                bottom = y + radius
+                
+                # Get origin if available, otherwise use unknown
+                origin = getattr(fp, 'origin', 'unknown')
+                color = colors.get(origin, colors['unknown'])
+                
+                # Draw circle with color based on origin
+                draw.ellipse([left, top, right, bottom], outline=color, width=2)
+                
+                # Add weight and origin as text
+                draw.text((x + radius + 2, y - radius), f"{origin}: {fp.weight:.1f}", fill=color)
+
+            # Create separate visualization for each rendition
+            for idx, rendition in enumerate(renditions):
+                # Create a copy of the original image for this rendition's visualization
+                rendition_img = image.copy()
+                rendition_draw = ImageDraw.Draw(rendition_img)
+                
+                # Draw the same focal points on the rendition image
+                for fp in focal_points:
+                    # Base radius on weight, but keep it reasonable
+                    weight_factor = min(1.0, fp.weight / 1000) if fp.weight > 1000 else fp.weight / 1000
+                    base_radius = 5
+                    radius = base_radius + (base_radius * weight_factor)
+                    
+                    x, y = fp.x, fp.y
+                    # Calculate the bounds of the circle
+                    left = x - radius
+                    top = y - radius
+                    right = x + radius
+                    bottom = y + radius
+                    
+                    # Get origin if available, otherwise use unknown
+                    origin = getattr(fp, 'origin', 'unknown')
+                    color = colors.get(origin, colors['unknown'])
+                    
+                    # Draw circle with color based on origin
+                    rendition_draw.ellipse([left, top, right, bottom], outline=color, width=2)
+                
+                # Draw the weighted center point
+                rendition_draw.ellipse([
+                    weighted_x - center_radius, 
+                    weighted_y - center_radius, 
+                    weighted_x + center_radius, 
+                    weighted_y + center_radius
+                ], outline="purple", width=3)
+                
+                # Draw crop dimensions for this specific rendition
+                if rendition.crop_dimensions:
+                    left, top, right, bottom = rendition.crop_dimensions
+                    
+                    # Create semi-transparent overlay
+                    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
+                    overlay_draw = ImageDraw.Draw(overlay)
+                    
+                    # Draw transparent rectangle over the whole image
+                    overlay_draw.rectangle([(0, 0), image.size], fill=(0, 0, 0, 128))
+                    
+                    # Draw transparent hole where the crop will be
+                    overlay_draw.rectangle([left, top, right, bottom], fill=(0, 0, 0, 0))
+                    
+                    # Draw border around crop area with rendition dimensions as label
+                    overlay_draw.rectangle([left, top, right, bottom], outline="white", width=4)
+                    overlay_draw.text(
+                        (left + 10, top + 10), 
+                        f"Rendition {idx+1}: {rendition.width}x{rendition.height}", 
+                        fill="white"
+                    )
+                    
+                    # Convert overlay to same mode as original image if needed
+                    if rendition_img.mode == 'RGB':
+                        # Draw the crop rectangle directly
+                        rendition_draw.rectangle([left, top, right, bottom], outline="white", width=4)
+                        rendition_draw.text(
+                            (left + 10, top + 10), 
+                            f"Rendition {idx+1}: {rendition.width}x{rendition.height}", 
+                            fill="white"
+                        )
+                    else:
+                        # Paste with alpha for RGBA images
+                        rendition_img.paste(overlay, (0, 0), overlay)
+
+                # Make sure the debug directory exists
+                debug_dir = "./tmp/thumbor_debug/"
+                if not os.path.exists(debug_dir):
+                    os.makedirs(debug_dir, exist_ok=True)
+
+                # Save this rendition's visualization
+                rendition_output = f"{debug_dir}debug_rendition_{rendition.width}x{rendition.height}.jpg"
+                rendition_img.save(rendition_output)
+                logger.info(f"Debug image for rendition {rendition.width}x{rendition.height} saved to {rendition_output}")
+            
+            # Create a composite visualization with all crop boxes
+            composite_img = image.copy()
+            composite_draw = ImageDraw.Draw(composite_img)
+            
+            # Draw the focal points and weighted center on the composite
+            for fp in focal_points:
+                origin = getattr(fp, 'origin', 'unknown')
+                color = colors.get(origin, colors['unknown'])
+                composite_draw.ellipse([
+                    fp.x - 5, fp.y - 5, fp.x + 5, fp.y + 5
+                ], outline=color, width=2)
+            
+            composite_draw.ellipse([
+                weighted_x - center_radius, 
+                weighted_y - center_radius, 
+                weighted_x + center_radius, 
+                weighted_y + center_radius
+            ], outline="purple", width=3)
+            
+            # Draw all crop rectangles with different colors
+            crop_colors = ["red", "green", "blue", "yellow", "cyan", "magenta"]
+            for idx, rendition in enumerate(renditions):
+                if rendition.crop_dimensions:
+                    color = crop_colors[idx % len(crop_colors)]
+                    left, top, right, bottom = rendition.crop_dimensions
+                    composite_draw.rectangle([left, top, right, bottom], outline=color, width=3)
+                    composite_draw.text(
+                        (left + 10, top + 10), 
+                        f"{rendition.width}x{rendition.height}", 
+                        fill=color
+                    )
+            
+            # Add original dimensions
+            if original_dimensions:
+                w, h = original_dimensions
+                composite_draw.text((10, 10), f"Original: {w}x{h}", fill="white")
+            
+            # Save the composite visualization
+            composite_output = f"{debug_dir}debug_all_renditions.jpg"
+            composite_img.save(composite_output)
+            logger.info(f"Composite debug image with all renditions saved to {composite_output}")
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error creating debug visualization: {str(e)}")
+            return False
+
+    async def smart_crop_multiple(self, image_path, renditions, extension=None, save_image=True, keep_fullsized=False):
         """
-        Perform smart cropping on an image
+        Perform smart cropping for multiple renditions in a single pass
         
         Args:
             image_path: Path to the input image file
-            width: Target width
-            height: Target height
+            renditions: List of Rendition objects with width, height and output_path
             extension: Output format extension (None for same as input)
+            save_image: Whether to save the image
+            keep_fullsized: Whether to also save the full-sized cropped image
             
         Returns:
-            bytes: The processed image as bytes
+            list: List of updated Rendition objects with crop dimensions and image buffers
         """
-        logger.info(f"Smart cropping image {image_path} to {width}x{height}")
+        logger.info(f"Smart cropping image {image_path} for {len(renditions)} renditions")
         
         # Read image file
         with open(image_path, 'rb') as f:
@@ -251,114 +463,141 @@ class SmartCropper:
 
         # Create engine and load image
         engine = self._create_engine(image_buffer, extension)
+        original_dimensions = engine.size
         
-        # Get focal points for smart cropping
+        # Get focal points for smart cropping - this is done only once!
         focal_points = await self._get_focal_points_async(engine, image_path)
         
-        # Calculate crop dimensions based on focal points
-        crop_dimensions = self._calculate_crop_dimensions(engine, width, height, focal_points)
+        engine_image = copy.deepcopy(engine.image)
+        engine_grayscale_image = copy.deepcopy(engine.grayscale_image)
+        engine_vvip_faces = copy.deepcopy(engine.vvip_faces)
         
-        # Log the crop dimensions for debugging
-        logger.info(f"Crop dimensions: {crop_dimensions}")
-        
-        # Crop the image
-        engine.crop(*crop_dimensions)
+        # Process each rendition
+        for rendition in renditions:
+            # Clone the engine for this rendition
+            rendition_engine = engine
+            rendition_engine.image = copy.deepcopy(engine_image)
+            rendition_engine.grayscale_image = copy.deepcopy(engine_grayscale_image)
+            rendition_engine.vvip_faces = copy.deepcopy(engine_vvip_faces)
 
-        # Convert to specified format if needed
-        fullsized_img_buffer = engine.read(extension)       
-
-        # Resize to final dimensions
-        engine.resize(width, height)
-        
-        # Convert to specified format if needed
-        img_buffer = engine.read(extension)            
-        
-        return img_buffer, fullsized_img_buffer, crop_dimensions
-
-    async def save_smart_cropped_image(self, image_path, width, height, output_path, extension=None, save_image=True, keep_fullsized=False):
-        """
-        Perform smart cropping and save the result
-        
-        Args:
-            image_path: Path to the input image file
-            width: Target width
-            height: Target height
-            output_path: Path to save the output image
-            extension: Output format extension (None for same as input)
+            # Calculate crop dimensions based on focal points
+            crop_dimensions = self._calculate_crop_dimensions(
+                rendition_engine, rendition.width, rendition.height, focal_points
+            )
+            rendition.crop_dimensions = crop_dimensions
             
-        Returns:
-            str: Path to the saved image
-        """
-        img_buffer, fullsized_img_buffer, crop_dimensions = await self.smart_crop(image_path, width, height, extension)
-        
-        if save_image:
-            # Make sure the output directory exists
-            output_dir = os.path.dirname(output_path)
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir)
+            logger.info(f"Crop dimensions for {rendition.width}x{rendition.height}: {crop_dimensions}")
             
-            # Save the processed image
-            with open(output_path, 'wb') as f:
-                f.write(img_buffer)
+            # Crop the image
+            rendition_engine.crop(*crop_dimensions)
             
-            logger.info(f"Saved smart cropped image to {output_path}")
-            if keep_fullsized:
-                _, file_ext = os.path.splitext(output_path)
-                output_path_without_ext, _ = os.path.splitext(output_path)
-                output_path_original = f"{output_path_without_ext}_original{file_ext}"
+            # Save full-sized cropped version
+            rendition.fullsized_img_buffer = rendition_engine.read(extension)
+            
+            # Resize to final dimensions
+            rendition_engine.resize(rendition.width, rendition.height)
+            
+            # Get final image buffer
+            rendition.img_buffer = rendition_engine.read(extension)
+            
+            # Save the image if requested and output path is provided
+            if save_image and rendition.output_path:
+                # Make sure the output directory exists
+                output_dir = os.path.dirname(rendition.output_path)
+                if output_dir and not os.path.exists(output_dir):
+                    os.makedirs(output_dir, exist_ok=True)
                 
-                # Save the crop for original image
-                with open(output_path_original, 'wb') as f:
-                    f.write(fullsized_img_buffer)
+                # Save the processed image
+                with open(rendition.output_path, 'wb') as f:
+                    f.write(rendition.img_buffer)
+                
+                logger.info(f"Saved rendition {rendition.width}x{rendition.height} to {rendition.output_path}")
+                
+                # Save full-sized cropped version if requested
+                if keep_fullsized:
+                    _, file_ext = os.path.splitext(rendition.output_path)
+                    output_path_without_ext, _ = os.path.splitext(rendition.output_path)
+                    output_path_original = f"{output_path_without_ext}_original{file_ext}"
+                    
+                    with open(output_path_original, 'wb') as f:
+                        f.write(rendition.fullsized_img_buffer)
+                    
+                    logger.info(f"Saved full-sized crop for {rendition.width}x{rendition.height} to {output_path_original}")
+        
+        # Create debug visualization with all renditions
+        self.draw_focal_points(image_path, focal_points, renditions, original_dimensions)
+        
+        return renditions
 
-        return crop_dimensions
-
-    def smart_crop_sync(self, image_path, width, height, output_path=None, extension=None):
+    def smart_crop_multiple_sync(self, image_path, renditions, extension=None, save_image=True, keep_fullsized=False):
         """
-        Synchronous wrapper for the async smart_crop method
+        Synchronous wrapper for the async smart_crop_multiple method
         
         Args:
             image_path: Path to the input image file
-            width: Target width
-            height: Target height
-            output_path: Path to save the output image (optional)
+            renditions: List of Rendition objects or tuples of (width, height, output_path)
             extension: Output format extension (None for same as input)
+            save_image: Whether to save the images
+            keep_fullsized: Whether to also save the full-sized cropped images
             
         Returns:
-            bytes or str: The processed image as bytes or the path to the saved image
+            list: List of Rendition objects with crop dimensions and image buffers
         """
+        # Convert simple tuples to Rendition objects if needed
+        processed_renditions = []
+        for item in renditions:
+            if isinstance(item, Rendition):
+                processed_renditions.append(item)
+            elif isinstance(item, dict):
+                width = item.get('width')
+                height = item.get('height')
+                output_path = item.get('output_path')
+                processed_renditions.append(Rendition(width, height, output_path))
+            elif isinstance(item, tuple) and len(item) >= 2:
+                width, height = item[0], item[1]
+                output_path = item[2] if len(item) > 2 else None
+                processed_renditions.append(Rendition(width, height, output_path))
+            else:
+                raise ValueError(f"Invalid rendition format: {item}")
+        
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        if output_path:
-            return loop.run_until_complete(
-                self.save_smart_cropped_image(image_path, width, height, output_path, extension)
+        return loop.run_until_complete(
+            self.smart_crop_multiple(
+                image_path, processed_renditions, extension, save_image, keep_fullsized
             )
-        else:
-            return loop.run_until_complete(
-                self.smart_crop(image_path, width, height, extension)
-            )
+        )
 
-
+    
 # Example usage
 if __name__ == "__main__":
     # Create a smart cropper instance
     cropper = SmartCropper("./thumbor.conf")  # Use your thumbor config if available
+    # Example image processing for multiple renditions
+    input_image = "test_images/942025181911706.jpg"
     
-    # Example image processing - replace with your actual image path
-    input_image = "thumbor_images/uploads/294202522024320_1746198457.jpeg"
-    output_image = "thumbor_images/outputs/smart_cropped.jpg"
+    # Define different renditions
+    renditions = [
+        # Portrait - 9:16
+        Rendition(width=1080, height=1920, output_path="thumbor_images/outputs/portrait.jpg"),
+        # Landscape - 16:9
+        Rendition(width=1920, height=1080, output_path="thumbor_images/outputs/landscape.jpg"),
+        # Square - 1:1
+        Rendition(width=1080, height=1080, output_path="thumbor_images/outputs/square.jpg"),
+    ]
     
-    # Process the image - use the synchronous method for direct scripts
-    result = cropper.smart_crop_sync(
+    # Process all renditions in a single pass
+    result = cropper.smart_crop_multiple_sync(
         image_path=input_image,
-        width=1920,
-        height=1080,
-        output_path=output_image,
-        extension="jpg"
+        renditions=renditions,
+        extension="jpg",
+        keep_fullsized=True
     )
     
-    print(f"Image processed and saved to {result}")
+    print(f"Processed {len(result)} renditions")
+    for rendition in result:
+        print(f"  - {rendition.width}x{rendition.height}: {rendition.crop_dimensions}")

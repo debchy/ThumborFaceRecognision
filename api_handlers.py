@@ -2,7 +2,7 @@ import os
 import logging
 import json
 from tornado.web import RequestHandler
-from direct_smart_crop import SmartCropper
+from direct_smart_crop import SmartCropper, Rendition
 import requests
 # Configure logging
 logging.basicConfig(
@@ -76,6 +76,7 @@ class ProcessImageHandler(RequestHandler):
                 self.write({"error": f"Image {image_filename} is not downloaded"})
                 return 
 
+            renditions = [] 
             crop_dimensions_list = []
             # Process the image directly without HTTP requests
             for dim in dimensions:
@@ -89,16 +90,21 @@ class ProcessImageHandler(RequestHandler):
                     output_name, _ = os.path.splitext(output_filename)
                     output_filename = f"{output_name}.{format_ext}"
                 output_path = os.path.join(OUTPUT_DIR, output_filename)                
+                renditions.append(Rendition(width=width, height= height, output_path=output_path))
                 
-                crop_dimensions = await cropper.save_smart_cropped_image(
-                    image_path=input_path,
-                    width=width,
-                    height=height,
-                    output_path=output_path,
-                    extension=format_ext,
-                    save_image = save_image,
-                    keep_fullsized= False
-                )
+            renditions = await cropper.smart_crop_multiple(
+                image_path      =   input_path,
+                renditions      =   renditions,
+                extension       =   format_ext,
+                save_image      =   save_image, #crop will save image or not
+                keep_fullsized  =   False #crop will keep the original size of the image or not
+            )
+
+            for rendition in renditions:
+                crop_dimensions = rendition.crop_dimensions
+                width = rendition.width
+                height = rendition.height
+            
                 crop_dimensions_list.append(
                     {
                         "rendition" : f'{width}x{height}',
@@ -110,7 +116,6 @@ class ProcessImageHandler(RequestHandler):
                         }
                     }
                 )
-            
             # Return the result
             result = {
                 "success": True,
