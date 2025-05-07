@@ -161,7 +161,7 @@ class SmartCropper:
         if hasattr(engine, 'vvip_faces') and engine.vvip_faces:
             for (x, y, w, h, name, confidence) in engine.vvip_faces:
                 # Give VVIP faces a very high weight to ensure they're prioritized
-                weight = 1000000  # High weight to ensure VVIP faces are prioritized
+                weight = 100  # High weight to ensure VVIP faces are prioritized
                 fp = FocalPoint(
                     x + w/2,  # Center X of face
                     y + h/2,  # Center Y of face
@@ -175,19 +175,20 @@ class SmartCropper:
                 logger.info(f"Using VVIP face as focal point: {name} at ({x}, {y})")
 
         # If no VVIP faces or want to try standard face detection anyway
-        #if isVVIP or not focal_points:
-        # Run face detector
-        face_points = await self._run_detector(FaceDetector, 0, "face_detector")
-        focal_points.extend(face_points)
+        if not focal_points:
+            # Run face detector
+            face_points = await self._run_detector(FaceDetector, 0, "face_detector")
+            focal_points.extend(face_points)
+            
+        # # Run profile detector
+        # profile_points = await self._run_detector(ProfileDetector, 1, "profile_detector")
+        # focal_points.extend(profile_points)
         
-        # Run profile detector
-        profile_points = await self._run_detector(ProfileDetector, 1, "profile_detector")
-        focal_points.extend(profile_points)
-        
-        # Run feature detector
-        feature_points = await self._run_detector(FeatureDetector, 2, "feature_detector")
-        focal_points.extend(feature_points)
-        
+        if len(focal_points)<2 :
+            # Run feature detector
+            feature_points = await self._run_detector(FeatureDetector, 2, "feature_detector")
+            focal_points.extend(feature_points)
+            
 
         if len( self.context.request.focal_points )>0:
             focal_points.extend(self.context.request.focal_points)
