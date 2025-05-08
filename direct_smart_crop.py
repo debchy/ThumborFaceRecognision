@@ -142,11 +142,22 @@ class SmartCropper:
         except Exception as e:
             logger.warning(f"{name} detection failed: {str(e)}")
             return []
+    
+    def _intersects(self, fp1, fp2):
+        """Check if two FocalPoints intersect"""
+        x1, y1, w1, h1 = fp1.x, fp1.y, fp1.width, fp1.height
+        x2, y2, w2, h2 = fp2.x, fp2.y, fp2.width, fp2.height
+        return (
+            x1 <= x2 + w2 and
+            x1 + w1 >= x2 and
+            y1 <= y2 + h2 and
+            y1 + h1 >= y2
+        )
 
     async def _get_focal_points_async(self, engine, image_path):
         """Get focal points for smart cropping"""
         focal_points = []
-        isVVIP = False
+        vvip_count = 0
         
         # Setup mock request
         mock_request = MockRequest(image_path)
@@ -159,39 +170,68 @@ class SmartCropper:
         
         # Check if we have VVIP faces from OpenCV engine
         if hasattr(engine, 'vvip_faces') and engine.vvip_faces:
+            vvip_count = len(engine.vvip_faces)
             for (x, y, w, h, name, confidence) in engine.vvip_faces:
                 # Give VVIP faces a very high weight to ensure they're prioritized
-                weight = 100  # High weight to ensure VVIP faces are prioritized
+                weight = 10000  # High weight to ensure VVIP faces are prioritized
                 fp = FocalPoint(
                     x + w/2,  # Center X of face
                     y + h/2,  # Center Y of face
                     width=w,
                     height=h,
-                    weight=weight*confidence,
+                    weight= w*h, #weight*confidence,
                     origin="VVIP"
                 )
                 focal_points.append(fp)
-                isVVIP = True
                 logger.info(f"Using VVIP face as focal point: {name} at ({x}, {y})")
-
-        # If no VVIP faces or want to try standard face detection anyway
-        if not focal_points:
+        
+        if vvip_count<2 :
             # Run face detector
             face_points = await self._run_detector(FaceDetector, 0, "face_detector")
             focal_points.extend(face_points)
-            
-        # # Run profile detector
-        # profile_points = await self._run_detector(ProfileDetector, 1, "profile_detector")
-        # focal_points.extend(profile_points)
-        
-        if len(focal_points)<2 :
+
             # Run feature detector
             feature_points = await self._run_detector(FeatureDetector, 2, "feature_detector")
             focal_points.extend(feature_points)
-            
 
-        if len( self.context.request.focal_points )>0:
-            focal_points.extend(self.context.request.focal_points)
+            # Run profile detector
+            profile_points = await self._run_detector(ProfileDetector, 1, "profile_detector")
+            focal_points.extend(profile_points)
+
+        
+        #if only single vvip is detected then, adjust vvip weight when other person's weight is higher
+        if vvip_count==1 and len(focal_points)>1:   
+            # Get the weight from focal_points where origin=='VVIP'         
+            vvip_fp = next((fp for fp in focal_points if fp.origin == 'VVIP'), None)
+            vvip_weight = vvip_fp.weight if vvip_fp else 0
+
+            #if any fp overlaps with vvip_fp, then remove it from feature_points
+            if vvip_fp:                
+                overlapped_points = [fp for fp in focal_points if fp.origin != 'VVIP' and self._intersects(vvip_fp, fp)]
+                logger.info(f'overlapped points: {overlapped_points}' )                 
+                focal_points = [fp for fp in focal_points if fp not in overlapped_points] if len(overlapped_points)>0 else focal_points
+            
+            # Cap weights to prevent extreme values
+            MAX_WEIGHT = 1000  # Choose appropriate max value
+            capped_focal_points = [
+                FocalPoint(fp.x, fp.y, fp.width, fp.height, 
+                        min(fp.weight, MAX_WEIGHT + 100 if fp.origin=="VVIP" else 0), 
+                        fp.origin) 
+                for fp in focal_points
+            ]
+            focal_points = capped_focal_points
+
+            # # Get the FoculPoint from focal_points where weight is max
+            # max_weight_fp = max([fp for fp in focal_points if fp.origin != 'VVIP'], key=lambda fp: fp.weight, default=None)    
+            # #adjust vvip weight when other person's weight is higher
+            # if vvip_fp and max_weight_fp and max_weight_fp.weight >= vvip_weight and vvip_weight>0:                
+            #     for i, fp in enumerate(focal_points):
+            #         if fp.origin == 'VVIP':
+            #             focal_points[i].weight = max_weight_fp.weight+100
+            #             break
+            #     logger.info(f"Increasing VVIP face weight as max focal point wight is greater than his one")
+
+            
 
         # If still no focal points, use center of image
         if not focal_points:
